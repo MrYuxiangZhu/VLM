@@ -160,31 +160,404 @@ scripts/video_infer.sh
 scripts/evaluate.sh
 ```
 
-## 6. 训练
+## 6. 微调模式完整说明
 
-编辑 `configs/train.yaml`，重点关注模型路径、视频采样帧率、序列长度和 LoRA 参数：
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python -m src.training.train --config configs/train.yaml
-```
-
-训练输出在 `outputs/qwen3-video-det-cls/`。断点续训：
+项目通过 `src/model/factory.py` 统一创建模型，通过 `scripts/finetune.sh` 选择训练模式。脚本调用格式如下：
 
 ```bash
-RESUME_FROM_CHECKPOINT=outputs/qwen3-video-det-cls/checkpoint-100 \\
-CUDA_VISIBLE_DEVICES=0 python -m src.train --config configs/train.yaml
+bash scripts/finetune.sh <mode> [config_path] [output_dir]
 ```
 
-这份实现使用全序列标签监督，padding 部分会被设为 `-100`。生产训练建议再加入 prompt token mask，只计算 assistant 输出损失；如果训练出现模型复述指令或输出格式不稳定，优先做这项改造。
+参数说明：
 
-## 7. 推理和评估
+| 参数 | 是否必填 | 默认值 | 说明 |
+|---|---|---|---|
+| `mode` | 否 | `lora` | 可选 `lora`、`qlora`、`dora`、`full` |
+| `config_path` | 否 | `configs/train.yaml` | 训练配置文件 |
+| `output_dir` | 否 | 配置中的 `output_dir` | 覆盖模型和 checkpoint 输出目录 |
+
+命令行模式会覆盖配置文件中的 `finetune_mode`。第三个参数会覆盖配置文件中的 `output_dir`。
+
+### 6.1 LoRA
+
+LoRA 冻结基础模型权重，只在指定线性层上训练低秩适配器。它通常是效果、显存、训练速度之间最均衡的方案，建议作为首个实验基线。
+
+```bash
+GPU_ID=0 bash scripts/finetune.sh \
+  lora \
+  configs/train.yaml \
+  outputs/qwen3-coco-lora
+```
+
+适用场景：
+
+- 单卡 24 GB 或更高显存；
+- 需要快速验证数据质量和输出格式；
+- 希望保留基础模型，并为不同任务分别保存小型 adapter；
+- COCO 图片检测、短视频理解等常规任务。
+
+相关配置：
+
+```yaml
+finetune_mode: lora
+lora_r: 64
+lora_alpha: 128
+lora_dropout: 0.05
+lora_bias: none
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+```
+
+`lora_r` 越大，可训练参数越多，表达能力和显存占用也越高。建议从 16、32 或 64 开始。`lora_alpha` 常设为 `r` 或 `2r`。数据量较小时可将 `lora_dropout` 设置为 0.05～0.1。
+
+LoRA 输出主要是 adapter 权重和配置，不是独立的完整基础模型。推理时必须能够访问原始基础模型。
+
+### 6.2 QLoRA
+
+QLoRA 以 4-bit 形式加载冻结的基础模型，并训练 LoRA adapter。当前实现使用 NF4 和双重量化：
+
+```yaml
+finetune_mode: qlora
+bnb_4bit_quant_type: nf4
+bnb_4bit_use_double_quant: true
+```
+
+启动命令：
+
+```bash
+GPU_ID=0 bash scripts/finetune.sh \
+  qlora \
+  configs/train.yaml \
+  outputs/qwen3-coco-qlora
+```
+
+适用场景：
+
+- GPU 显存有限；
+- 16～24 GB 单卡上尝试 7B/8B 模型；
+- 视频帧数较少、分辨率经过限制的微调；
+- 可以接受量化加载带来的额外计算开销。
+
+QLoRA 要求：
+
+- NVIDIA CUDA GPU；
+- Linux 环境；
+- 已安装 `bitsandbytes`；
+- PyTorch CUDA 版本与 NVIDIA 驱动兼容。
+
+检查环境：
+
+```bash
+python3 -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
+python3 -c "import bitsandbytes as bnb; print(bnb.__version__)"
+```
+
+如果出现 CUDA OOM，优先降低：
+
+```yaml
+max_seq_length: 1024
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 16
+```
+
+视频训练还应降低数据配置中的 `fps`，并提前限制视频长度和分辨率。
+
+### 6.3 DoRA
+
+DoRA 将权重更新分解为方向和幅度两部分，仍然通过 PEFT adapter 训练。当前实现使用：
+
+```python
+use_dora=True
+```
+
+启动命令：
+
+```bash
+GPU_ID=0 bash scripts/finetune.sh \
+  dora \
+  configs/train.yaml \
+  outputs/qwen3-coco-dora
+```
+
+DoRA 通常比标准 LoRA 占用更多显存和计算资源，但在部分任务上能获得更好的效果。建议在 LoRA 基线稳定后，再使用完全相同的数据划分和超参数对比 DoRA。
+
+DoRA 当前不是 4-bit QDoRA；它按 BF16/FP16 加载基础模型。如果需要 QDoRA，需要进一步组合量化加载和 `use_dora=True`，并验证所用 PEFT、bitsandbytes 和模型结构的兼容性。
+
+### 6.4 Full SFT
+
+Full SFT 不创建 adapter，模型全部参数参与训练：
+
+```bash
+GPU_ID=0 bash scripts/finetune.sh \
+  full \
+  configs/train.yaml \
+  outputs/qwen3-coco-full
+```
+
+适用场景：
+
+- 数据量足够大且标注质量高；
+- 需要显著改变模型能力；
+- 有多卡高显存 GPU；
+- 能接受较大的 checkpoint、优化器状态和训练成本。
+
+对于 7B/8B 模型，Full SFT 的显存不仅包含模型权重，还包括梯度、优化器状态和激活值。单卡 24～48 GB 通常不足，建议使用多张 A100/H100 80 GB，并进一步接入 DeepSpeed ZeRO-3 或 FSDP。当前脚本是基础 Trainer 入口，不会自动启用 ZeRO/FSDP。
+
+### 6.5 模式对比
+
+| 模式 | 基础模型加载 | 训练参数 | 显存需求 | 输出形式 | 推荐用途 |
+|---|---|---:|---:|---|---|
+| `lora` | BF16/FP16 | 少量 adapter | 中 | adapter | 默认基线、24 GB+ 单卡 |
+| `qlora` | 4-bit NF4 | 少量 adapter | 最低 | adapter | 16～24 GB 单卡 |
+| `dora` | BF16/FP16 | adapter | 中高 | adapter | LoRA 效果对比 |
+| `full` | BF16/FP16 | 全部参数 | 极高 | 完整模型 | 多卡生产训练 |
+
+推荐选择顺序：
+
+1. 首先运行 LoRA，确认数据、loss、JSON 输出和评估流程；
+2. 显存不足时改为 QLoRA；
+3. LoRA 收敛稳定后测试 DoRA；
+4. 只有数据量、GPU 和训练基础设施充足时才使用 Full SFT。
+
+## 7. 训练配置与运行
+
+### 7.1 安装和环境检查
+
+```bash
+bash scripts/setup_conda.sh
+conda activate vlm-qwen
+nvidia-smi
+```
+
+确认项目依赖：
+
+```bash
+python3 -c "import torch, transformers, peft; print(torch.__version__, transformers.__version__, peft.__version__)"
+```
+
+### 7.2 核心训练配置
+
+`configs/train.yaml` 的主要字段：
+
+| 字段 | 说明 |
+|---|---|
+| `model_name_or_path` | Hugging Face 模型名或本地模型目录 |
+| `finetune_mode` | 默认微调模式 |
+| `output_dir` | checkpoint 和最终模型目录 |
+| `log_dir` | 文件日志和 Trainer 日志目录 |
+| `train_dataset` | 训练数据集配置，可以是单个字典或列表 |
+| `validation_dataset` | 验证数据集配置 |
+| `max_seq_length` | 最大文本/多模态序列长度 |
+| `gradient_accumulation_steps` | 梯度累积步数 |
+| `learning_rate` | 学习率 |
+| `bf16` | 是否使用 BF16 |
+| `save_steps` | checkpoint 保存间隔 |
+| `eval_steps` | 验证间隔 |
+
+当前 COCO 配置示例：
+
+```yaml
+model_name_or_path: Qwen/Qwen3-VL-8B-Instruct
+finetune_mode: lora
+output_dir: outputs/qwen3-coco-det-cls
+log_dir: outputs/logs
+
+train_dataset:
+  type: coco
+  annotations: /home/yuxiangzhu/volume/VLM/data/coco_train.jsonl
+  media_root: /home/yuxiangzhu/volume/animal_det/data/coco/train2017
+
+validation_dataset:
+  type: coco
+  annotations: /home/yuxiangzhu/volume/VLM/data/coco_val.jsonl
+  media_root: /home/yuxiangzhu/volume/animal_det/data/coco/val2017
+
+num_train_epochs: 3
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 0.0002
+max_seq_length: 4096
+bf16: true
+```
+
+### 7.3 启动训练
+
+推荐使用统一脚本：
+
+```bash
+bash scripts/finetune.sh lora configs/train.yaml outputs/qwen3-coco-lora
+```
+
+原始 Python 入口同样可用：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python3 -m src.training.train \
+  --config configs/train.yaml \
+  --mode lora \
+  --output-dir outputs/qwen3-coco-lora
+```
+
+### 7.4 断点续训
+
+```bash
+RESUME_FROM_CHECKPOINT=outputs/qwen3-coco-lora/checkpoint-100 \
+GPU_ID=0 bash scripts/finetune.sh \
+  lora configs/train.yaml outputs/qwen3-coco-lora
+```
+
+断点目录必须和当前微调模式匹配，不要用 LoRA checkpoint 恢复 QLoRA、DoRA 或 Full SFT。
+
+### 7.5 日志和 checkpoint
+
+运行日志写入：
+
+```text
+outputs/logs/run.log
+```
+
+checkpoint 写入当前 `output_dir`：
+
+```text
+outputs/qwen3-coco-lora/
+├── checkpoint-100/
+├── checkpoint-200/
+└── adapter_model.safetensors
+```
+
+配置：
+
+```yaml
+logging_steps: 5
+save_steps: 100
+eval_steps: 100
+save_total_limit: 2
+```
+
+`save_total_limit` 可以防止大量 checkpoint 占满磁盘。训练时重点观察 `loss`、`eval_loss`、学习率、每步耗时、GPU 显存以及生成 JSON 的合法率。
+
+### 7.6 当前监督策略
+
+当前 collator 会复制完整 `input_ids` 作为标签，并只把 padding 位置设置为 `-100`。因此 system、user prompt 和 assistant answer 都参与 loss 计算。这可以运行，但不是最理想的 SFT 策略。
+
+生产训练建议进一步增加 assistant-only loss mask，只监督 assistant JSON 输出。这样能够减少模型学习复述提示词，并提高结构化输出稳定性。
+
+## 8. 微调前后指标 HTML 报告
+
+项目提供 `scripts/report.sh`，会使用同一份验证集分别评估基础模型和微调模型，然后生成一份可直接用浏览器打开的 HTML 对比报告。
+
+```bash
+bash scripts/report.sh \\
+  Qwen/Qwen3-VL-8B-Instruct \\
+  outputs/qwen3-coco-lora \\
+  data/coco_val.jsonl \\
+  /home/yuxiangzhu/volume/animal_det/data/coco/val2017 \\
+  outputs/reports/qwen3_lora_comparison.html \\
+  image
+```
+
+参数顺序：
+
+```text
+参数1：微调前模型路径或 Hugging Face 模型名
+参数2：微调后模型路径
+参数3：验证集 JSONL，默认 data/coco_val.jsonl
+参数4：图片/视频根目录，默认 COCO val2017 目录
+参数5：HTML 输出路径，默认 outputs/reports/finetune_comparison.html
+参数6：输入类型 image 或 video，默认 image
+参数7：视频 FPS，默认 2
+```
+
+视频模型对比：
+
+```bash
+bash scripts/report.sh \\
+  Qwen/Qwen3-VL-8B-Instruct \\
+  outputs/qwen3-video-lora \\
+  data/video_val.jsonl \\
+  /data/videos \\
+  outputs/reports/video_comparison.html \\
+  video \\
+  2
+```
+
+报告生成过程：
+
+1. 评估微调前模型；
+2. 保存基础模型指标 JSON；
+3. 评估微调后模型；
+4. 保存微调模型指标 JSON；
+5. 生成 HTML 对比报告。
+
+默认会生成：
+
+```text
+outputs/reports/finetune_comparison.html
+outputs/reports/finetune_comparison.baseline.json
+outputs/reports/finetune_comparison.finetuned.json
+```
+
+HTML 报告包含：
+
+- 微调前模型和微调后模型信息；
+- 验证集样本数；
+- Detection F1；
+- Classification Accuracy；
+- 合法 JSON 输出率；
+- 指标绝对变化和百分点变化；
+- 指标横向条形图；
+- 原始评估 JSON；
+- 评估条件一致性提示。
+
+也可以只使用已有的两个指标 JSON 生成报告，不重复执行模型推理：
+
+```bash
+python3 -m src.evaluation.report \\
+  --before outputs/reports/baseline.json \\
+  --after outputs/reports/finetuned.json \\
+  --before-name "Qwen3-VL base" \\
+  --after-name "Qwen3-VL LoRA" \\
+  --output outputs/reports/comparison.html
+```
+
+单独保存评估指标：
+
+```bash
+python3 -m src.evaluation.evaluate \\
+  --model outputs/qwen3-coco-lora \\
+  --data data/coco_val.jsonl \\
+  --media-root /home/yuxiangzhu/volume/animal_det/data/coco/val2017 \\
+  --media-type image \\
+  --output-json outputs/reports/lora_metrics.json
+```
+
+指标定义：
+
+- `detection_f1`：类别匹配且 IoU 大于等于 0.5 的检测 F1；
+- `classification_accuracy`：视频级/图片级类别准确率；
+- `json_valid_rate`：模型输出能被解析为合法 JSON 的比例；
+- `valid_json`：合法 JSON 样本数；
+- `samples`：总评估样本数。
+
+报告只能比较在相同验证集、相同类别集合、相同 IoU 阈值、相同媒体类型和相同采样 FPS 下得到的结果。报告生成不会伪造指标；必须先实际运行两个模型的评估。
+
+## 9. 推理和评估
 
 单视频推理：
 
 ```bash
-python -m src.inference.infer \\
+python3 -m src.inference.infer \\
   --model outputs/qwen3-video-det-cls \\
-  --video videos/example.mp4 \\
+  --media videos/example.mp4 \\
+  --media-type video \\
+  --fps 2 \\
   --instruction '检测视频中的所有目标，并从 [person, car, bicycle, other] 中选择视频级类别。' \\
   --output prediction.json
 ```
@@ -192,14 +565,14 @@ python -m src.inference.infer \\
 在验证集上计算分类准确率和 IoU=0.5 的检测 F1：
 
 ```bash
-python -m src.evaluation.evaluate \\
+python3 -m src.evaluation.evaluate \\
   --model outputs/qwen3-video-det-cls \\
   --data data/val.jsonl
 ```
 
 评估指标只是基线：真正的检测任务建议补充 mAP@50、mAP@50:95、按类别 AP、空目标召回率以及长视频/短视频分桶指标。
 
-## 8. 目录结构
+## 10. 目录结构
 
 ```text
 .
@@ -214,7 +587,7 @@ python -m src.evaluation.evaluate \\
 └── src/evaluation/          # IoU、F1 和评估入口
 ```
 
-## 9. 常见问题
+## 11. 常见问题
 
 ### 模型名不是 Qwen3-VL
 

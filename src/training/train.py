@@ -7,11 +7,11 @@ from typing import Any
 
 import torch
 import yaml
-from peft import LoraConfig, TaskType, get_peft_model
-from transformers import AutoModelForCausalLM, AutoProcessor, Trainer, TrainingArguments, set_seed
+from transformers import AutoProcessor, Trainer, TrainingArguments, set_seed
 
-from ..data.datasets import build_dataset
 from ..common.logging_utils import configure_logging
+from ..data.datasets import build_dataset
+from ..model.factory import SUPPORTED_FINETUNE_MODES, build_model
 
 
 @dataclass
@@ -43,21 +43,20 @@ class VisionCollator:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/train.yaml")
+    parser.add_argument("--mode", choices=SUPPORTED_FINETUNE_MODES, help="Override finetune_mode in config")
+    parser.add_argument("--output-dir", help="Override output_dir in config")
     args = parser.parse_args()
     with open(args.config, encoding="utf-8") as file:
         cfg = yaml.safe_load(file)
+    mode = (args.mode or cfg.get("finetune_mode", "lora")).lower()
+    if args.output_dir:
+        cfg["output_dir"] = args.output_dir
     logger = configure_logging(cfg["log_dir"])
-    logger.info("loaded config=%s", args.config)
+    logger.info("loaded config=%s mode=%s output=%s", args.config, mode, cfg["output_dir"])
     set_seed(cfg["seed"])
 
     processor = AutoProcessor.from_pretrained(cfg["model_name_or_path"], trust_remote_code=True)
-    dtype = torch.bfloat16 if cfg["bf16"] else torch.float16
-    model = AutoModelForCausalLM.from_pretrained(cfg["model_name_or_path"], torch_dtype=dtype, device_map="auto", trust_remote_code=True)
-    model = get_peft_model(model, LoraConfig(
-        r=cfg["lora_r"], lora_alpha=cfg["lora_alpha"], lora_dropout=cfg["lora_dropout"],
-        target_modules=cfg["lora_target_modules"], task_type=TaskType.CAUSAL_LM,
-    ))
-    model.print_trainable_parameters()
+    model = build_model(cfg, mode)
     train_set = build_dataset(cfg["train_dataset"])
     eval_set = build_dataset(cfg["validation_dataset"])
     logger.info("dataset sizes train=%d validation=%d", len(train_set), len(eval_set))

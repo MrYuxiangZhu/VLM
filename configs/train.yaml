@@ -1,4 +1,5 @@
 model_name_or_path: Qwen/Qwen3-VL-8B-Instruct
+finetune_mode: lora
 output_dir: outputs/qwen3-coco-det-cls
 log_dir: outputs/logs
 report_to: none
@@ -26,5 +27,8 @@ bf16: true
 lora_r: 64
 lora_alpha: 128
 lora_dropout: 0.05
+lora_bias: none
+bnb_4bit_quant_type: nf4
+bnb_4bit_use_double_quant: true
 lora_target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 seed: 42
