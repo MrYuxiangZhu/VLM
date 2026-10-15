@@ -20,20 +20,31 @@ class VisionDataset(ABC, Dataset):
 
 
 class JsonlVisionDataset(VisionDataset):
-    def __init__(self, annotation_file: str, media_root: str = "", media_type: str = "video", fps: float = 2.0) -> None:
+    def __init__(self, annotation_file: str, media_root: str = "", media_type: str = "video", fps: float = 2.0, validate_media: bool = True) -> None:
+        self.annotation_file = Path(annotation_file)
         self.records = load_records(annotation_file)
-        self.media_root = Path(media_root) if media_root else Path(annotation_file).parent
+        self.media_root = Path(media_root) if media_root else self.annotation_file.parent
         self.media_type = media_type
         self.fps = fps
+        if validate_media:
+            self.validate_media()
+
+    def resolve_media(self, record: Record) -> Path:
+        media_path = Path(record.video)
+        return media_path if media_path.is_absolute() else self.media_root / media_path
+
+    def validate_media(self) -> None:
+        missing = [str(self.resolve_media(record)) for record in self.records if not self.resolve_media(record).is_file()]
+        if missing:
+            preview = "\\n".join(missing[:5])
+            raise FileNotFoundError(f"{len(missing)} media files are missing; first files:\\n{preview}")
 
     def __len__(self) -> int:
         return len(self.records)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         record = self.records[index]
-        media_path = Path(record.video)
-        if not media_path.is_absolute():
-            media_path = self.media_root / media_path
+        media_path = self.resolve_media(record)
         media = {"type": self.media_type, self.media_type: str(media_path)}
         if self.media_type == "video":
             media["fps"] = self.fps
@@ -58,7 +69,7 @@ def build_dataset(spec: dict[str, Any] | list[dict[str, Any]]) -> VisionDataset:
         return ConcatDataset([build_dataset(item) for item in spec])
     dataset_type = spec.get("type", "jsonl")
     if dataset_type == "jsonl":
-        return JsonlVisionDataset(spec["annotations"], spec.get("media_root", ""), spec.get("media_type", "video"), spec.get("fps", 2.0))
+        return JsonlVisionDataset(spec["annotations"], spec.get("media_root", ""), spec.get("media_type", "video"), spec.get("fps", 2.0), spec.get("validate_media", True))
     if dataset_type == "coco":
-        return CocoDataset(spec["annotations"], spec["media_root"], "image", 0.0)
+        return CocoDataset(spec["annotations"], spec["media_root"], "image", 0.0, spec.get("validate_media", True))
     raise ValueError(f"Unknown dataset type: {dataset_type}")

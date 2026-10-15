@@ -11,6 +11,7 @@ MEDIA_ROOT="${4:-/home/yuxiangzhu/volume/animal_det/data/coco/val2017}"
 OUTPUT_HTML="${5:-outputs/reports/finetune_comparison.html}"
 MEDIA_TYPE="${6:-image}"
 FPS="${7:-2}"
+IOU_THRESHOLD="${IOU_THRESHOLD:-0.5}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
@@ -25,6 +26,7 @@ mkdir -p "$(dirname "$OUTPUT_HTML")"
   --media-root "$MEDIA_ROOT" \
   --media-type "$MEDIA_TYPE" \
   --fps "$FPS" \
+  --iou-threshold "$IOU_THRESHOLD" \
   --output-json "$BASELINE_JSON"
 
 "$PYTHON_BIN" -m src.evaluation.evaluate \
@@ -33,6 +35,7 @@ mkdir -p "$(dirname "$OUTPUT_HTML")"
   --media-root "$MEDIA_ROOT" \
   --media-type "$MEDIA_TYPE" \
   --fps "$FPS" \
+  --iou-threshold "$IOU_THRESHOLD" \
   --output-json "$FINETUNED_JSON"
 
 "$PYTHON_BIN" -m src.evaluation.report \

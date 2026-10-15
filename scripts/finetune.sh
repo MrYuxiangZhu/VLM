@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 MODE="${1:-${FINETUNE_MODE:-lora}}"
 CONFIG="${2:-${CONFIG:-configs/train.yaml}}"
-OUTPUT_DIR="${3:-${OUTPUT_DIR:-}}"
+OUTPUT_DIR="${3:-${OUTPUT_DIR:-outputs/qwen3-${MODE}}}"
 GPU_ID="${GPU_ID:-0}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 

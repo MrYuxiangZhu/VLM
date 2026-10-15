@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -60,15 +62,29 @@ def main() -> None:
     train_set = build_dataset(cfg["train_dataset"])
     eval_set = build_dataset(cfg["validation_dataset"])
     logger.info("dataset sizes train=%d validation=%d", len(train_set), len(eval_set))
+    use_bf16 = bool(cfg.get("bf16", True) and torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+    use_fp16 = bool(cfg.get("fp16", not use_bf16) and torch.cuda.is_available() and not use_bf16)
+    optimizer = cfg.get("optim")
+    if optimizer is None:
+        optimizer = "paged_adamw_8bit" if mode == "qlora" else "adamw_torch"
     training_args = TrainingArguments(
         output_dir=cfg["output_dir"], num_train_epochs=cfg["num_train_epochs"],
         per_device_train_batch_size=cfg["per_device_train_batch_size"], per_device_eval_batch_size=cfg["per_device_eval_batch_size"],
         gradient_accumulation_steps=cfg["gradient_accumulation_steps"], learning_rate=cfg["learning_rate"], warmup_ratio=cfg["warmup_ratio"],
         logging_steps=cfg["logging_steps"], save_steps=cfg["save_steps"], eval_strategy="steps", eval_steps=cfg["eval_steps"],
-        save_total_limit=cfg["save_total_limit"], bf16=cfg["bf16"], gradient_checkpointing=True, remove_unused_columns=False,
-        report_to=cfg.get("report_to", "none"), logging_dir=cfg["log_dir"], dataloader_num_workers=cfg.get("num_workers", 2),
+        save_total_limit=cfg["save_total_limit"], bf16=use_bf16, fp16=use_fp16,
+        gradient_checkpointing=cfg.get("gradient_checkpointing", True),
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        remove_unused_columns=False, ddp_find_unused_parameters=False,
+        optim=optimizer, report_to=cfg.get("report_to", "none"), logging_dir=cfg["log_dir"],
+        dataloader_num_workers=cfg.get("num_workers", 2), save_safetensors=True,
     )
     trainer = Trainer(model=model, args=training_args, train_dataset=train_set, eval_dataset=eval_set, data_collator=VisionCollator(processor, cfg["max_seq_length"]))
+    Path(cfg["output_dir"]).mkdir(parents=True, exist_ok=True)
+    Path(cfg["output_dir"], "training_config.json").write_text(
+        json.dumps({**cfg, "finetune_mode": mode}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     logger.info("training started")
     trainer.train(resume_from_checkpoint=os.getenv("RESUME_FROM_CHECKPOINT"))
     trainer.save_model(cfg["output_dir"])

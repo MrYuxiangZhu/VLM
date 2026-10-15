@@ -166,6 +166,8 @@ scripts/evaluate.sh
 
 ```bash
 bash scripts/finetune.sh <mode> [config_path] [output_dir]
+
+当不传 `output_dir` 时，脚本默认使用 `outputs/qwen3-<mode>`，例如 LoRA 输出到 `outputs/qwen3-lora`。
 ```
 
 参数说明：
@@ -308,7 +310,7 @@ GPU_ID=0 bash scripts/finetune.sh \
 - 有多卡高显存 GPU；
 - 能接受较大的 checkpoint、优化器状态和训练成本。
 
-对于 7B/8B 模型，Full SFT 的显存不仅包含模型权重，还包括梯度、优化器状态和激活值。单卡 24～48 GB 通常不足，建议使用多张 A100/H100 80 GB，并进一步接入 DeepSpeed ZeRO-3 或 FSDP。当前脚本是基础 Trainer 入口，不会自动启用 ZeRO/FSDP。
+对于 7B/8B 模型，Full SFT 的显存不仅包含模型权重，还包括梯度、优化器状态和激活值。单卡 24～48 GB 通常不足，建议使用多张 A100/H100 80 GB，并进一步接入 DeepSpeed ZeRO-3 或 FSDP。当前脚本是基础 Trainer 入口，不会自动启用 ZeRO/FSDP；Full SFT 多卡训练需要额外提供 DeepSpeed/FSDP 配置，并通过 Accelerate 或 torchrun 启动。
 
 ### 6.5 模式对比
 
@@ -449,7 +451,84 @@ save_total_limit: 2
 
 生产训练建议进一步增加 assistant-only loss mask，只监督 assistant JSON 输出。这样能够减少模型学习复述提示词，并提高结构化输出稳定性。
 
-## 8. 微调前后指标 HTML 报告
+## 8. 全链路优化说明
+
+当前框架按以下链路拆分：
+
+```text
+数据配置 → 数据校验/路径解析 → 多模态消息构建 → Processor/Collator
+→ 模型工厂（LoRA/QLoRA/DoRA/Full SFT）→ Trainer
+→ 单模型复用推理引擎 → 统一指标 → HTML 报告
+```
+
+### 数据加载优化
+
+- `src/data/datasets.py` 统一图片、视频、COCO 和 JSONL 数据协议；
+- 数据集初始化时默认校验媒体文件是否存在，尽早发现路径错误；
+- 支持列表形式追加多个数据集，并通过 `ConcatDataset` 合并；
+- 使用 `media_root` 统一管理相对路径；
+- 大数据集建议保留 JSONL 标注并使用 SSD，避免把视频帧全部展开到磁盘；
+- 数据集规模较大时可设置 `validate_media: false` 跳过启动时全量检查，但上线训练前建议保持 `true`。
+
+示例：
+
+```yaml
+train_dataset:
+  - type: coco
+    annotations: data/coco_train.jsonl
+    media_root: /data/coco/train2017
+    validate_media: true
+  - type: jsonl
+    annotations: data/video_train.jsonl
+    media_root: /data/videos
+    media_type: video
+    fps: 1.0
+    validate_media: true
+```
+
+### 预处理优化建议
+
+- COCO 标注先转换为统一 JSONL，训练和评估使用同一输出协议；
+- bbox 统一归一化到 `[0, 1]`，避免分辨率变化导致标签失效；
+- 训练/验证必须按视频或原始场景划分，不能把同一视频的相邻片段分到两侧；
+- 视频训练优先控制 `fps`、最大时长和分辨率，视觉 token 数量对显存影响很大；
+- 训练前执行一次媒体存在性校验，避免多进程 DataLoader 运行到中途才失败。
+
+### 模型训练优化
+
+- 模型创建集中在 `src/model/factory.py`，模式切换不再散落在训练器中；
+- QLoRA 自动配置 4-bit NF4、double quant 和 `paged_adamw_8bit`；
+- DoRA 使用 PEFT 的 `use_dora=True`；
+- Full SFT 自动开启全参数训练，但多卡仍需要 DeepSpeed/FSDP 配置；
+- 自动关闭 `use_cache`，兼容 gradient checkpointing；
+- 自动根据 GPU 能力选择 BF16 或 FP16；
+- 每次训练保存 `training_config.json`，保证实验可复现；
+- 不同模式使用不同输出目录，避免 adapter 和完整模型相互覆盖。
+
+训练推荐顺序：先 LoRA 验证数据和指标，再尝试 QLoRA/DoRA，最后再考虑 Full SFT。
+
+### 推理优化
+
+`src/inference/engine.py` 中的 `VisionPredictor` 会只加载一次 processor 和模型。评估多个样本时复用同一模型，避免原先每个样本重复加载 checkpoint 的严重性能问题。
+
+单视频推理仍可使用：
+
+```bash
+bash scripts/video_infer.sh videos/example.mp4 outputs/video.json 2
+```
+
+批量评估使用同一个 `VisionPredictor`，不需要手动管理模型生命周期。
+
+### 指标和报告优化
+
+- 检测匹配会按置信度排序，再按类别和 IoU 做一对一匹配；
+- 增加 `precision`、`recall`、`f1`、`mean_iou`；
+- 增加 `json_valid_rate`，单独衡量结构化输出可靠性；
+- 评估支持 `--iou-threshold`，默认 0.5；
+- HTML 报告会展示 Detection F1、Classification Accuracy、JSON 合法率和 Mean IoU；
+- 基线模型和微调模型必须使用相同验证集及推理参数。
+
+## 9. 微调前后指标 HTML 报告
 
 项目提供 `scripts/report.sh`，会使用同一份验证集分别评估基础模型和微调模型，然后生成一份可直接用浏览器打开的 HTML 对比报告。
 
@@ -548,7 +627,7 @@ python3 -m src.evaluation.evaluate \\
 
 报告只能比较在相同验证集、相同类别集合、相同 IoU 阈值、相同媒体类型和相同采样 FPS 下得到的结果。报告生成不会伪造指标；必须先实际运行两个模型的评估。
 
-## 9. 推理和评估
+## 10. 推理和评估
 
 单视频推理：
 
@@ -572,7 +651,7 @@ python3 -m src.evaluation.evaluate \\
 
 评估指标只是基线：真正的检测任务建议补充 mAP@50、mAP@50:95、按类别 AP、空目标召回率以及长视频/短视频分桶指标。
 
-## 10. 目录结构
+## 11. 目录结构
 
 ```text
 .
@@ -587,7 +666,7 @@ python3 -m src.evaluation.evaluate \\
 └── src/evaluation/          # IoU、F1 和评估入口
 ```
 
-## 11. 常见问题
+## 12. 常见问题
 
 ### 模型名不是 Qwen3-VL
 

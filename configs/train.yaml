@@ -1,5 +1,6 @@
 model_name_or_path: Qwen/Qwen3-VL-8B-Instruct
 finetune_mode: lora
+# 可选：lora / qlora / dora / full
 output_dir: outputs/qwen3-coco-det-cls
 log_dir: outputs/logs
 report_to: none
@@ -8,10 +9,12 @@ train_dataset:
   type: coco
   annotations: /home/yuxiangzhu/volume/VLM/data/coco_train.jsonl
   media_root: /home/yuxiangzhu/volume/animal_det/data/coco/train2017
+  validate_media: true
 validation_dataset:
   type: coco
   annotations: /home/yuxiangzhu/volume/VLM/data/coco_val.jsonl
   media_root: /home/yuxiangzhu/volume/animal_det/data/coco/val2017
+  validate_media: true
 max_seq_length: 4096
 num_train_epochs: 3
 per_device_train_batch_size: 1
@@ -24,6 +27,12 @@ save_steps: 100
 eval_steps: 100
 save_total_limit: 2
 bf16: true
+fp16: false
+gradient_checkpointing: true
+distributed: false
+# Full SFT 建议使用 DeepSpeed/FSDP 多卡，并将 distributed 设为 true。
+# QLoRA 默认使用 paged_adamw_8bit；其他模式默认 adamw_torch。
+# optim: adamw_torch
 lora_r: 64
 lora_alpha: 128
 lora_dropout: 0.05
