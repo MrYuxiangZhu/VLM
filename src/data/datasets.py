@@ -48,10 +48,13 @@ class JsonlVisionDataset(VisionDataset):
         media = {"type": self.media_type, self.media_type: str(media_path)}
         if self.media_type == "video":
             media["fps"] = self.fps
+        output = record.output
+        if hasattr(output, "model_dump"):
+            output = output.model_dump(mode="json")
         messages = [
             {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
             {"role": "user", "content": [media, {"type": "text", "text": record.instruction}]},
-            {"role": "assistant", "content": [{"type": "text", "text": json.dumps(record.output, ensure_ascii=False)}]},
+            {"role": "assistant", "content": [{"type": "text", "text": json.dumps(output, ensure_ascii=False)}]},
         ]
         return {"messages": messages, "media": str(media_path), "media_type": self.media_type}
 

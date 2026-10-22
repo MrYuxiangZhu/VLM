@@ -5,7 +5,7 @@ from typing import Any
 
 import torch
 from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, BitsAndBytesConfig
 
 LOGGER = logging.getLogger("vlm.model")
 SUPPORTED_FINETUNE_MODES = ("lora", "qlora", "dora", "full")
@@ -49,7 +49,8 @@ def build_model(cfg: dict[str, Any], mode: str):
         raise ValueError(f"finetune mode must be one of {SUPPORTED_FINETUNE_MODES}, got {mode!r}")
 
     dtype = _dtype(cfg)
-    model = AutoModelForCausalLM.from_pretrained(
+    auto_cls = AutoModelForImageTextToText if cfg.get("image_text_to_text", True) else AutoModelForCausalLM
+    model = auto_cls.from_pretrained(
         cfg["model_name_or_path"],
         **_load_kwargs(cfg, mode, dtype),
     )

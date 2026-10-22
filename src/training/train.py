@@ -12,6 +12,7 @@ import yaml
 from transformers import AutoProcessor, Trainer, TrainingArguments, set_seed
 
 from ..common.logging_utils import configure_logging
+from ..common.metrics_log import MetricsCallback
 from ..data.datasets import build_dataset
 from ..model.factory import SUPPORTED_FINETUNE_MODES, build_model
 
@@ -79,7 +80,14 @@ def main() -> None:
         optim=optimizer, report_to=cfg.get("report_to", "none"), logging_dir=cfg["log_dir"],
         dataloader_num_workers=cfg.get("num_workers", 2), save_safetensors=True,
     )
-    trainer = Trainer(model=model, args=training_args, train_dataset=train_set, eval_dataset=eval_set, data_collator=VisionCollator(processor, cfg["max_seq_length"]))
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_set,
+        eval_dataset=eval_set,
+        data_collator=VisionCollator(processor, cfg["max_seq_length"]),
+        callbacks=[MetricsCallback(cfg["output_dir"], logger)],
+    )
     Path(cfg["output_dir"]).mkdir(parents=True, exist_ok=True)
     Path(cfg["output_dir"], "training_config.json").write_text(
         json.dumps({**cfg, "finetune_mode": mode}, ensure_ascii=False, indent=2),

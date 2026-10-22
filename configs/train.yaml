@@ -1,43 +1,64 @@
-model_name_or_path: Qwen/Qwen3-VL-8B-Instruct
+# 模型：本地 Qwen3-VL-8B-Instruct
+model_name_or_path: /home/users/yuxiang.zhu/vlm/models/Qwen3-VL-8B-Instruct
+
+# 微调模式：lora（多卡模型并行下显存足够，速度比 qlora 快 30%）
 finetune_mode: lora
-# 可选：lora / qlora / dora / full
-output_dir: outputs/qwen3-coco-det-cls
+
+# 关键：把模型自动分布到所有可见 GPU（实现模型并行）
+device_map: auto
+
+# 输出与日志
+output_dir: outputs/qwen3-coco-lora
 log_dir: outputs/logs
 report_to: none
 num_workers: 2
+
+# 训练数据
 train_dataset:
   type: coco
-  annotations: /home/yuxiangzhu/volume/VLM/data/coco_train.jsonl
-  media_root: /home/yuxiangzhu/volume/animal_det/data/coco/train2017
+  annotations: /home/users/yuxiang.zhu/vlm/VLM-master/data/coco_train.jsonl
+  media_root: /home/users/yuxiang.zhu/vlm/coco/train2017
   validate_media: true
+
+# 验证数据
 validation_dataset:
   type: coco
-  annotations: /home/yuxiangzhu/volume/VLM/data/coco_val.jsonl
-  media_root: /home/yuxiangzhu/volume/animal_det/data/coco/val2017
+  annotations: /home/users/yuxiang.zhu/vlm/VLM-master/data/coco_val.jsonl
+  media_root: /home/users/yuxiang.zhu/vlm/coco/val2017
   validate_media: true
-max_seq_length: 4096
-num_train_epochs: 3
+
+# 序列长度：双卡下 2048 是安全的
+max_seq_length: 2048
+
+# 训练轮次
+num_train_epochs: 1
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
-gradient_accumulation_steps: 8
-learning_rate: 0.0002
+gradient_accumulation_steps: 16
+
+# 学习率
+learning_rate: 0.0001
 warmup_ratio: 0.03
-logging_steps: 5
-save_steps: 100
-eval_steps: 100
+
+# 日志/保存/验证
+logging_steps: 20
+save_steps: 500
+eval_steps: 500
 save_total_limit: 2
+
+# 精度
 bf16: true
 fp16: false
 gradient_checkpointing: true
 distributed: false
-# Full SFT 建议使用 DeepSpeed/FSDP 多卡，并将 distributed 设为 true。
-# QLoRA 默认使用 paged_adamw_8bit；其他模式默认 adamw_torch。
-# optim: adamw_torch
-lora_r: 64
-lora_alpha: 128
+
+# LoRA 参数
+lora_r: 32
+lora_alpha: 64
 lora_dropout: 0.05
 lora_bias: none
 bnb_4bit_quant_type: nf4
 bnb_4bit_use_double_quant: true
 lora_target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
 seed: 42

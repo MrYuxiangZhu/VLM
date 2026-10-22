@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
+# GPU_ID=0,1,2,3 bash scripts/finetune.sh lora configs/train.yaml outputs/qwen3-coco-lora
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+
+# 默认使用本地模型/不联网
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 
 MODE="${1:-${FINETUNE_MODE:-lora}}"
 CONFIG="${2:-${CONFIG:-configs/train.yaml}}"

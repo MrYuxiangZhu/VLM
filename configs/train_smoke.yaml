@@ -1,0 +1,39 @@
+model_name_or_path: /home/users/yuxiang.zhu/vlm/models/Qwen3-VL-8B-Instruct
+finetune_mode: qlora
+output_dir: outputs/qwen3-coco-smoke
+log_dir: outputs/logs
+report_to: none
+num_workers: 0
+train_dataset:
+  type: coco
+  annotations: /home/users/yuxiang.zhu/vlm/VLM-master/data/coco_train_small.jsonl
+  media_root: /home/users/yuxiang.zhu/vlm/coco/train2017
+  validate_media: true
+validation_dataset:
+  type: coco
+  annotations: /home/users/yuxiang.zhu/vlm/VLM-master/data/coco_val_small.jsonl
+  media_root: /home/users/yuxiang.zhu/vlm/coco/val2017
+  validate_media: true
+max_seq_length: 1024
+num_train_epochs: 1
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 0.0002
+warmup_ratio: 0.03
+logging_steps: 1
+save_steps: 20
+eval_steps: 20
+save_total_limit: 2
+bf16: true
+fp16: false
+gradient_checkpointing: true
+distributed: false
+lora_r: 64
+lora_alpha: 128
+lora_dropout: 0.05
+lora_bias: none
+bnb_4bit_quant_type: nf4
+bnb_4bit_use_double_quant: true
+lora_target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+seed: 42
